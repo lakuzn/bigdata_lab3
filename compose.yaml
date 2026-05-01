@@ -1,0 +1,65 @@
+services:
+  # MinIO
+  minio:
+    image: minio/minio:latest
+    container_name: lakehouse-minio
+    ports:
+      - "9000:9000" # API
+      - "9001:9001" # Web-консоль
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./data/minio_data:/data
+    restart: unless-stopped
+
+  # Утилита для автоматического создания бакетов при запуске
+  minio-init:
+    image: minio/mc:latest
+    container_name: lakehouse-minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set myminio http://minio:9000 admin password;
+      mc mb myminio/lakehouse --ignore-existing;
+      mc mb myminio/mlflow --ignore-existing;
+      exit 0;
+      "
+
+  # MLflow Tracking Server
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: lakehouse-mlflow
+    ports:
+      - "5000:5000"
+    environment:
+      # Настройки для подключения к MinIO
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+    command: >
+      mlflow server 
+      --backend-store-uri sqlite:////mlflow/mlflow.db 
+      --default-artifact-root s3://mlflow/ 
+      --host 0.0.0.0
+      --allowed-hosts "mlflow,mlflow:5000,localhost,localhost:5000"
+    volumes:
+      - ./data/mlflow:/mlflow
+    depends_on:
+      - minio-init
+    restart: unless-stopped
+
+  # App
+  app:
+    build: .
+    container_name: lakehouse-app
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      mlflow:
+        condition: service_started
